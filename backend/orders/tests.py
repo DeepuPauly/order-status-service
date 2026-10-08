@@ -46,3 +46,25 @@ class IngestionTests(TestCase):
         post(self.client, "D4", "pending", "2025-01-01T09:00:00Z", "trading_platform")
         post(self.client, "D4", "paid", "2025-01-01T09:00:00Z", "payment_processor")
         self.assertEqual(Order.objects.get(pk="D4").status, "paid")
+
+    def test_tie_on_timestamp_reverse_arrival_order(self):
+        # Same tie as above, opposite arrival order: payment still wins.
+        post(self.client, "E5", "paid", "2025-01-01T09:00:00Z", "payment_processor")
+        post(self.client, "E5", "pending", "2025-01-01T09:00:00Z", "trading_platform")
+        order = Order.objects.get(pk="E5")
+        self.assertEqual(order.status, "paid")
+        self.assertEqual(order.last_source, "payment_processor")
+
+    def test_null_field_is_rejected_without_writing(self):
+        response = post(self.client, "F6", None, "2025-01-01T09:00:00Z", "payment_processor")
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(Event.objects.filter(order_id="F6").exists())
+        self.assertFalse(Order.objects.filter(pk="F6").exists())
+
+    def test_unknown_source_is_rejected(self):
+        response = post(self.client, "G7", "paid", "2025-01-01T09:00:00Z", "anything")
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(Event.objects.filter(order_id="G7").exists())
+
+    def test_non_post_returns_405(self):
+        self.assertEqual(self.client.get("/api/ingest/").status_code, 405)

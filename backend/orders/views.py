@@ -5,6 +5,7 @@ from django.http import HttpResponseBadRequest, JsonResponse
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_POST
 
 from .models import Event, Order
 
@@ -15,15 +16,19 @@ SOURCE_PRIORITY = {"payment_processor": 2, "trading_platform": 1}
 
 
 @csrf_exempt
+@require_POST
 def ingest(request):
-    if request.method != "POST":
-        return HttpResponseBadRequest("POST only")
-
     try:
         payload = json.loads(request.body)
         order_id = payload["order_id"]
         status = payload["status"]
         source = payload["source"]
+        # Reject bad fields up front with a 400. Otherwise a null status fails
+        # the NOT NULL constraint, gets mistaken for a duplicate, and ends in a 500.
+        if not (_valid_str(order_id, 255) and _valid_str(status, 50)):
+            raise ValueError("order_id and status must be non-empty strings")
+        if source not in SOURCE_PRIORITY:
+            raise ValueError("unknown source")
         ts = parse_datetime(payload["event_timestamp"])
         if ts is None:
             raise ValueError("bad event_timestamp")
@@ -46,8 +51,10 @@ def ingest(request):
 
 def _record_raw_event(order_id, status, ts, source):
     try:
-        # Wrapped in its own savepoint so that a duplicate (IntegrityError)
-        # only rolls back THIS insert, not the whole surrounding transaction.
+        # Wrapped in its own atomic block so that a duplicate (IntegrityError)
+        # only rolls back THIS insert. When there is an outer transaction
+        # (TestCase, or ATOMIC_REQUESTS) this becomes a savepoint and keeps
+        # that transaction usable instead of raising TransactionManagementError.
         with transaction.atomic():
             Event.objects.create(
                 order_id=order_id, status=status, event_timestamp=ts, source=source
@@ -85,14 +92,20 @@ def _apply_authoritative(order_id, status, ts, source):
             order.save()
 
 
+def _valid_str(value, max_length):
+    return isinstance(value, str) and 0 < len(value) <= max_length
+
+
 def _should_replace(order, ts, source):
     """Decide whether an incoming event should become the new truth."""
     if ts > order.status_event_timestamp:
         return True   # newer event always wins
     if ts < order.status_event_timestamp:
         return False  # older event never overwrites (out-of-order safety)
-    # Same timestamp, different sources -> higher-priority source wins.
-    return SOURCE_PRIORITY.get(source, 0) > SOURCE_PRIORITY.get(order.last_source, 0)
+    # Same timestamp -> higher-priority source wins. Same source with a
+    # different status at the same timestamp: first arrival is kept (would
+    # need an upstream event ID / sequence number to do better).
+    return SOURCE_PRIORITY[source] > SOURCE_PRIORITY.get(order.last_source, 0)
 
 
 def order_list(request):

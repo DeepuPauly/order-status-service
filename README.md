@@ -174,7 +174,9 @@ The reasoning is that payment represents the financial source of truth, while th
 
 The rule is implemented in a single `_should_replace()` function so the behavior is easy to understand and modify.
 
-Any source not listed in `SOURCE_PRIORITY` receives the lowest priority on timestamp ties. New sources should be added explicitly.
+Any source not listed in `SOURCE_PRIORITY` is rejected with **400 Bad Request**. New sources must be added to `SOURCE_PRIORITY` explicitly.
+
+Known gap: if the **same** source sends two different statuses with exactly the same timestamp, the first one to arrive is kept. Resolving that properly would need an upstream event ID or sequence number, which the payload does not include.
 
 ---
 
@@ -182,7 +184,7 @@ Any source not listed in `SOURCE_PRIORITY` receives the lowest priority on times
 
 Updates are wrapped inside a database transaction.
 
-The order row is locked using `select_for_update()` before applying updates, preventing concurrent requests from overwriting each other.
+The order row is locked using `select_for_update()` before applying updates, so concurrent requests for the same order cannot overwrite each other. This is effective on PostgreSQL; on SQLite (used here) `select_for_update()` is a no-op and SQLite's own write serialization is what prevents lost updates.
 
 ---
 
@@ -193,7 +195,10 @@ The project includes tests covering the scenarios most likely to fail:
 - Duplicate webhook delivery does not create duplicate state.
 - Older events never overwrite newer status.
 - Later timestamps correctly replace earlier ones.
-- Equal timestamps resolve using the defined source priority.
+- Equal timestamps resolve using the defined source priority, in either arrival order.
+- A payload with a missing or null field returns 400 and writes nothing.
+- An unknown `source` returns 400 and writes nothing.
+- Non-POST requests to the ingest endpoint return 405.
 
 While implementing duplicate handling, I encountered an issue where an `IntegrityError` left the surrounding transaction unusable, causing a `TransactionManagementError`.
 
